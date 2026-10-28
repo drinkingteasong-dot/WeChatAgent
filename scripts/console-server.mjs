@@ -1,11 +1,14 @@
 import {feedbackSnapshot,saveFeedback} from '../packages/dsh-social-bridge-plugin/assistant-feedback.mjs';
 import {createMemoryConsole} from './memory-console.mjs';
 import {fishNotebookSnapshot} from './fish-notebook-console.mjs';
+import {createSpeechPluginConsole} from './speech-plugin-console.mjs';
 import fs from 'node:fs';
 import {createPersonaCategories} from './persona-categories.mjs';
 import {createUpdateChecker} from './update-check.mjs';
 import {builtinCatalog,applyBuiltinUpdate,extensionPresentation} from './extension-status.mjs';
-import {pluginCatalog,updatePlugin,archivePlugin,packageFiles,inspectPackage} from '../packages/plugin-api/catalog.mjs';
+import {pluginCatalog,updatePlugin,archivePlugin,runtimeCatalog,scanPlugins} from '../packages/plugin-api/catalog.mjs';
+import {hostCompatibility,HOST_RUNTIME} from '../packages/plugin-api/contract.mjs';
+import {packageFiles,inspectPackage} from '../packages/plugin-api/catalog.mjs';
 import {PluginInstaller} from '../packages/plugin-api/installer.mjs';
 import {packZip} from '../packages/plugin-api/zip.mjs';
 import {bundledExtensionCatalog,saveBundledExtension} from './bundled-extensions.mjs';
@@ -87,10 +90,11 @@ export function validateConsoleConfig(config, root) {
 }
 
 import {allowedConversation,validateConversationSettings,conversationWorkMode} from '../packages/dsh-social-bridge-plugin/conversation-policy.mjs';
-export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, accountVerifier = verifyWeChatAccount, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit, processProbe, processStop } = {}) {
+export function createConsole({ root = projectRoot, port = 3210, runner, readerSetup = runReaderSetup, accountVerifier = verifyWeChatAccount, fetchImpl = fetch, nodeExecutable = process.execPath, filePicker, onQuit, processProbe, processStop, speechCapabilities } = {}) {
   const updates=createUpdateChecker({root,fetchImpl});
   const publicDir = path.join(projectRoot, 'public', 'console');
   const pluginInstaller=new PluginInstaller(root);
+  const speechChecks=createSpeechPluginConsole({root,fetchImpl,...(speechCapabilities?{readCapabilities:speechCapabilities}:{})});
   const personaCategories=createPersonaCategories(root);
   const categorySnapshot=()=>{try{return personaCategories.read();}catch(error){return {categories:[],assignments:{},revision:null,error:error.message};}};
   const configFile = path.join(root, 'config', 'wechatagent.json');
@@ -178,7 +182,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     if(body===undefined)return remote(`http://127.0.0.1:${config.ports.dshPlugin}${route}`, token, 5000);
     const response=await fetchImpl(`http://127.0.0.1:${config.ports.dshPlugin}${route}`,{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(60000)});
     const result=await response.json();
-    if(!response.ok){const messages={SESSION_GROUP_SERVICE_UNAVAILABLE:'DSH 工作区服务尚未就绪，请从托盘完整退出并重开 DSH。',SESSION_GROUP_INVALID_NAME:'分组名称需要 1–60 个字符。',SESSION_GROUP_INVALID_PATH:'请选择一个已存在、可访问的完整目录。',SESSION_GROUP_CHANGED:'工作区列表已变化，请刷新会话页面后重试。',SESSION_GROUP_NOT_FOUND:'工作区已被移除，请刷新后重新选择。',SESSION_GROUP_DUPLICATE_NAME:'DSH 中已有同名工作区，请换一个名称。',SESSION_GROUP_NOT_EMPTY:'此工作区仍有未归档的 DSH 会话，请先移走它们。',SESSION_GROUP_SESSION_BUSY:'此聊天正在回复或维护，请稍后再移动。',SESSION_GROUP_SESSION_CHANGED:'当前会话已变化，请刷新后重新移动。',SESSION_GROUP_ACCOUNT_CHANGED:'微信账号已切换，请重开 DSH 后重试。',SESSION_GROUP_CHAT_NOT_ALLOWED:'请选择聊天范围中已保存的聊天。',SESSION_GROUP_CONFIRM_REQUIRED:'请确认跨目录移动时保留历史的方式。',SESSION_GROUP_SOURCE_UNAVAILABLE:'原会话的工作目录无法访问，请恢复该目录后再移动。'};throw fault(messages[result.error]??(route.startsWith('/plugin-actions/')||route.startsWith('/fish-notebook/')?'插件操作暂未完成，请检查插件授权并确认 DSH 已加载新版宿主。':'工作区操作未完成，原会话仍保留。请检查 DSH 运行日志后重试。'),[400,404,409].includes(response.status)?response.status:503);}
+    if(!response.ok){const messages={ACCOUNT_SWITCH_REQUIRES_DSH_RESTART:'微信账号已切换，请重开 DSH 后重试。',session_busy:'此聊天正在回复，请等待完成后再修复。',HISTORY_REPAIR_SESSION_CHANGED:'当前会话已变化，请刷新后重试。',HISTORY_REPAIR_CHAT_NOT_ALLOWED:'聊天范围已变化，请刷新后重试。',HISTORY_REPAIR_CONFIRM_REQUIRED:'请先确认修复这个聊天的上下文。',HISTORY_REPAIR_UNAVAILABLE:'此会话不使用原生人格前缀，无需执行此项修复。',HISTORY_ACCOUNT_CHANGED:'微信账号已切换，请重开 DSH 后重试。',HISTORY_NATIVE_PREFIX_UNAVAILABLE:'DSH 提示词服务尚未就绪，请完整退出并重新打开 DSH。',SESSION_GROUP_SERVICE_UNAVAILABLE:'DSH 工作区服务尚未就绪，请从托盘完整退出并重开 DSH。',SESSION_GROUP_INVALID_NAME:'分组名称需要 1–60 个字符。',SESSION_GROUP_INVALID_PATH:'请选择一个已存在、可访问的完整目录。',SESSION_GROUP_CHANGED:'工作区列表已变化，请刷新会话页面后重试。',SESSION_GROUP_NOT_FOUND:'工作区已被移除，请刷新后重新选择。',SESSION_GROUP_DUPLICATE_NAME:'DSH 中已有同名工作区，请换一个名称。',SESSION_GROUP_NOT_EMPTY:'此工作区仍有未归档的 DSH 会话，请先移走它们。',SESSION_GROUP_SESSION_BUSY:'此聊天正在回复或维护，请稍后再移动。',SESSION_GROUP_SESSION_CHANGED:'当前会话已变化，请刷新后重新移动。',SESSION_GROUP_ACCOUNT_CHANGED:'微信账号已切换，请重开 DSH 后重试。',SESSION_GROUP_CHAT_NOT_ALLOWED:'请选择聊天范围中已保存的聊天。',SESSION_GROUP_CONFIRM_REQUIRED:'请确认跨目录移动时保留历史的方式。',SESSION_GROUP_SOURCE_UNAVAILABLE:'原会话的工作目录无法访问，请恢复该目录后再移动。'};throw fault(messages[result.error]??(route==='/repair-context'?(messages[result.detail]??'上下文修复未完成，原会话已保留。请检查 DSH 运行日志。'):route.startsWith('/plugin-actions/')||route.startsWith('/fish-notebook/')?'插件操作暂未完成，请检查插件授权并确认 DSH 已加载新版宿主。':'工作区操作未完成，原会话仍保留。请检查 DSH 运行日志后重试。'),[400,404,409].includes(response.status)?response.status:503);}
     return result;
   }
   function buffered() {
@@ -374,6 +378,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const url = new URL(req.url, origin);
       const route = url.pathname;
       if (req.method === 'GET' && !route.startsWith('/api/')) {
+        if(route==='/plugin-contract.mjs')return reply(200,fs.readFileSync(path.join(projectRoot,'packages/plugin-api/contract.mjs'),'utf8'),'text/javascript; charset=utf-8');
+        if(route==='/speech-settings.mjs')return reply(200,fs.readFileSync(path.join(publicDir,'speech-settings.mjs'),'utf8'),'text/javascript; charset=utf-8');
         if(route==='/plugin-api.md'){res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Content-Disposition':'attachment; filename="WeChatAgent-plugin-api-v2.md"','X-Content-Type-Options':'nosniff'});res.end(fs.readFileSync(path.join(projectRoot,'docs/PLUGIN_DEVELOPMENT.md')));return;}
         if(route==='/plugin-example.zip'){const example=path.join(projectRoot,'examples/plugins/chat-notes');inspectPackage(example);res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':'attachment; filename="chat-notes-1.0.0.zip"','X-Content-Type-Options':'nosniff'});res.end(packZip(packageFiles(example)));return;}
         if(route==='/plugin-packages/fish-notebook.zip'){const source=path.join(projectRoot,'optional-extensions/fish-notebook');inspectPackage(source);res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':'attachment; filename="fish-notebook-1.0.0.zip"','X-Content-Type-Options':'nosniff'});res.end(packZip(packageFiles(source)));return;}
@@ -418,11 +424,11 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if(req.method==='GET'&&route==='/api/dsh-catalog'){const key=url.searchParams.get('conversationKey');if(key&&!allowedConversation(snapshot().config.wechat,key))throw fault('请先保存聊天范围。');return reply(200,await plugin('/dsh-catalog'+(key?'?conversationKey='+encodeURIComponent(key):'')));}
       if(req.method==='GET'&&route==='/api/meme-library-status'){try{return reply(200,await plugin('/meme-library/status'));}catch{return reply(200,{available:false,installed:false,reason:'DSH_PLUGIN_UNAVAILABLE'});}}
       if(req.method==='GET'&&(route==='/api/extensions'||route==='/api/plugins')){
-        const saved=snapshot();let connected=false,runtime=[],pluginApiReady=false,liveFeatures=[];
-        try{const health=await plugin('/health');connected=!!health.ok;pluginApiReady=health.pluginRuntime==='isolated-v2';liveFeatures=health.pluginHostFeatures??[];if(pluginApiReady)runtime=(await plugin('/extensions')).extensions??[];}catch{}
-        const catalog=pluginCatalog(root,runtime);
-        for(const item of catalog.plugins)if(item.enabled&&item.requiresHostFeatures.some(feature=>!liveFeatures.includes(feature))){item.loaded=false;item.active=false;item.reason='请准备配置并完整重开 DSH，加载此插件需要的新版宿主。';item.statusLabel='等待新版宿主';item.statusTone='warning';}
-        if(route==='/api/plugins')return reply(200,{...catalog,runtimeConnected:pluginApiReady});
+        const saved=snapshot();let connected=false,runtime=[],pluginApiReady=false,live=null;
+        try{live=await plugin('/health');connected=!!live.ok;pluginApiReady=live.pluginRuntime===HOST_RUNTIME;if(pluginApiReady)runtime=(await plugin('/extensions')).extensions??[];}catch{}
+        const catalog=runtimeCatalog(pluginCatalog(root,runtime),live);
+        for(const item of catalog.plugins)if(item.id==='speech-recognition')item.serviceStatus=speechChecks.status();
+        if(route==='/api/plugins')return reply(200,catalog);
         return reply(200,{...builtinCatalog(saved.config,saved.revision,connected),plugins:catalog.plugins,pluginRevision:catalog.revision,pluginError:catalog.error??null,canInstallZip:true,pluginApiReady});
       }
       if (req.method === 'GET' && route === '/api/deployment') {
@@ -467,6 +473,14 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         return reply(200, { chats: Object.entries(buffer.chats ?? {}).map(([key, rows]) => ({ key, name: rows.at(-1)?.conversation_name ?? key, lastAt: rows.at(-1)?.timestamp ?? 0 })) });
       }
       if (req.method === 'GET' && route === '/api/sessions') return reply(200, await plugin('/sessions'));
+      if(req.method==='POST'&&route==='/api/sessions/repair-context'){
+        const value=await readBody(req),key=String(value.key??'');
+        if(value.confirmed!==true)throw fault('请先确认修复这个聊天的上下文。',400);
+        const w=snapshot().config.wechat,match=/^wechat:(private|group):([1-9]\d*)$/.exec(key);
+        if(!match||!(w.whitelist[match[1]==='group'?'groups':'private']??[]).map(String).includes(match[2]))throw fault('请选择聊天范围中已保存的聊天。',403);
+        if(typeof value.expectedSessionId!=='string'||!/^social-[a-f0-9]{32}$/.test(value.expectedSessionId))throw fault('当前会话已变化，请刷新后重试。',409);
+        return reply(200,await plugin('/repair-context',{conversationKey:key,expectedSessionId:value.expectedSessionId,confirmed:true}));
+      }
       if(req.method==='GET'&&route==='/api/session-groups'){try{return reply(200,await plugin('/session-groups'));}catch{return reply(200,{available:false,groups:[],revision:''});}}
       if (req.method === 'GET' && route === '/api/job') {
         const job = jobs.get(url.searchParams.get('id')); if (!job) throw fault('此操作记录已过期。', 404); return reply(200, job);
@@ -490,11 +504,22 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if(route==='/api/updates/check')return reply(200,await updates.check({force:true}));
       if (route === '/api/jobs') return reply(202, startJob(body));
       assertIdle();
-      if(route==='/api/plugins/inspect')return reply(200,pluginInstaller.inspect(body));
+      if(route==='/api/plugins/inspect'){const result=pluginInstaller.inspect(body);let live=null;try{live=await plugin('/health');}catch{}return reply(200,{...result,compatibility:hostCompatibility(result.plugin,live)});}
       if(route==='/api/plugins/install')return reply(200,pluginInstaller.install(body));
       if(route==='/api/plugins/cancel')return reply(200,pluginInstaller.cancel(body.ticket));
+      const speechOperation=/^\/api\/plugins\/speech-recognition\/(models|check)$/.exec(route);
+      if(speechOperation){
+        const controller=new AbortController(),closed=()=>{if(!res.writableEnded)controller.abort();};res.once('close',closed);
+        try{return reply(200,await speechChecks.run(speechOperation[1],body,{signal:controller.signal}));}
+        catch(error){if(controller.signal.aborted||res.destroyed)return;throw error;}
+        finally{res.removeListener('close',closed);}
+      }
       const pluginRoute=/^\/api\/plugins\/([a-z][a-z0-9-]{0,39})(\/uninstall)?$/.exec(route);
-      if(pluginRoute){const result=pluginRoute[2]?archivePlugin(root,pluginRoute[1],body.revision):updatePlugin(root,pluginRoute[1],body);return reply(200,{ok:true,revision:result.revision});}
+      if(pluginRoute){
+        if(!pluginRoute[2]&&pluginRoute[1]==='speech-recognition')await speechChecks.validateForSave(body);
+        if(!pluginRoute[2]&&body.enabled===true){let live=null;try{live=await plugin('/health');}catch{}const item=scanPlugins(root).find(item=>item.id===pluginRoute[1]&&!item.invalid);if(item&&live){const compatibility=hostCompatibility(item,live);if(!compatibility.compatible)throw fault(compatibility.reason,409);}}
+        const result=pluginRoute[2]?archivePlugin(root,pluginRoute[1],body.revision):updatePlugin(root,pluginRoute[1],body);if(!pluginRoute[2]&&pluginRoute[1]==='speech-recognition')speechChecks.onSaved();return reply(200,{ok:true,revision:result.revision});
+      }
       const pluginAction=/^\/api\/plugins\/([a-z][a-z0-9-]{0,39})\/actions\/([a-z][a-z0-9-]{0,19})$/.exec(route);
       if(pluginAction){if(!allowedConversation(snapshot().config.wechat,body.key))throw fault('请选择已允许的聊天。',403);return reply(200,await plugin('/plugin-actions/'+pluginAction[1]+'/'+pluginAction[2],{conversationKey:body.key,args:body.args??{}}));}
       if(route==='/api/fish-notebook/settings'||route==='/api/fish-notebook/write'){
@@ -667,7 +692,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     };
     listen();
   });
-  server.on('close',()=>pluginInstaller.dispose());
+  server.on('close',()=>{pluginInstaller.dispose();speechChecks.close();});
   return { server, shutdown, isBusy: () => shuttingDown || !!activeJob || protectingCredential || processRecoveryBusy, close: () => { server.closeAllConnections(); server.close(); }, start };
 }
 

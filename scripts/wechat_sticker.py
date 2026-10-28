@@ -241,7 +241,9 @@ def resolve_sticker_bytes(account, content, allow_cdn=False, allow_cdn_alias=Fal
                     except OSError:
                         continue
     if not allow_cdn:
-        raise RuntimeError('IMAGE_STICKER_LOCAL_COPY_UNAVAILABLE')
+        failure = RuntimeError('IMAGE_STICKER_LOCAL_COPY_UNAVAILABLE')
+        failure.reason = 'STICKER_CDN_DISABLED'
+        raise failure
     deadline = time.monotonic() + 20
     error = 'IMAGE_STICKER_SOURCE_UNAVAILABLE'
     for name in ('cdnurl', 'encrypturl', 'externurl'):

@@ -6,7 +6,7 @@ import {conversationAccess,conversationWorkMode} from './conversation-policy.mjs
 import {dshCatalog} from './dsh-access.mjs';
 import {taskFault,liveTask,assistantHelp,formatAssistantTask} from './assistant-tasks.mjs';
 
-export function createAssistantControl({ctx,root,tasks,accountReady,sessionGroups,mappings,profiles,pending,notifications}){
+export function createAssistantControl({ctx,root,tasks,accountReady,sessionGroups,mappings,profiles,pending,notifications,beforeSubmit=async()=>{}}){
   const confirmations=new Map(),approvals=new Map(),questions=new Map();
   const settings=()=>JSON.parse(fs.readFileSync(path.join(root,'config/wechatagent.json'),'utf8')).wechat;
   const allowed=(body,w=settings())=>{
@@ -55,7 +55,10 @@ export function createAssistantControl({ctx,root,tasks,accountReady,sessionGroup
       if(body.localControl===true)throw taskFault('ASSISTANT_SENDER_REQUIRED',400);
       if(body.assistantSender!==body.senderWxid)throw taskFault('ASSISTANT_SENDER_DENIED',403);
       if(typeof body.message!=='string'||!body.message.trim()||body.message.length>18000)throw taskFault('invalid_request',400);
-      if(body.assistantParentId){const parent=own(body,w,tasks.get(body.assistantParentId));if(parent.sessionId&&mappings[key]!==parent.sessionId)throw taskFault('ASSISTANT_WORKSPACE_CHANGED');}
+      const exists=[...tasks.jobs.values()].some(job=>job.key===key&&job.sender===body.assistantSender&&job.batchId===body.batchId);
+      if(!exists)await beforeSubmit(key);
+      const current=allowed(body);
+      if(body.assistantParentId){const parent=own(body,current,tasks.get(body.assistantParentId));if(parent.sessionId&&mappings[key]!==parent.sessionId)throw taskFault('ASSISTANT_WORKSPACE_CHANGED');}
       return {ok:true,task:tasks.submit(body)};
     }
     const list=()=>tasks.list(key,body.senderWxid,{admin});

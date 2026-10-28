@@ -3,6 +3,7 @@ import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {validateSchema,fail} from './catalog.mjs';
+import {hostContract,contractFingerprint,HOOKS} from './contract.mjs';
 
 export class PluginProcess{
   constructor(item,{onFailure=()=>{}}={}){this.item=item;this.pending=new Map();this.onFailure=onFailure;this.closed=false;}
@@ -20,11 +21,12 @@ export class PluginProcess{
   message(message){
     if(!message||this.closed)return;
     if(message.type==='ready'&&this.loading){
+      if(contractFingerprint(message.contract??{})!==contractFingerprint(hostContract())){this.stop('PLUGIN_HOST_CONTRACT_MISMATCH');return;}
       try{
         if(!Array.isArray(message.tools)||message.tools.length>16||!Array.isArray(message.hooks))throw Error();
         const ids=new Set();
         for(const tool of message.tools){if(!/^[a-z][a-z0-9-]{0,19}$/.test(tool.id??'')||ids.has(tool.id)||typeof tool.description!=='string'||!tool.description.trim()||tool.description.length>2000)throw Error();ids.add(tool.id);validateSchema(tool.parameters);if(tool.parameters.type!=='object')throw Error();}
-        if(message.hooks.some(name=>!['before-context','after-response'].includes(name)))throw Error();
+        if(message.hooks.some(name=>!HOOKS.includes(name)))throw Error();
         if(!Array.isArray(message.actions)||message.actions.length>16||!!message.scheduled!==!!this.item.schedule)throw Error();
         const actionIds=new Set();for(const action of message.actions){if(!/^[a-z][a-z0-9-]{0,19}$/.test(action.id??'')||actionIds.has(action.id)||typeof action.description!=='string'||!action.description.trim()||action.description.length>2000)throw Error();actionIds.add(action.id);validateSchema(action.parameters);if(action.parameters.type!=='object')throw Error();}
         this.tools=message.tools;this.actions=message.actions;this.scheduled=message.scheduled===true;this.hooks=message.hooks;clearTimeout(this.loadTimer);this.loading.resolve(this);delete this.loading;

@@ -124,6 +124,21 @@ export function fixedWindowPrefix(profile){
   return ['WeChatAgent 当前人格与规则：',profile.persona,profile.instructions,readOnlySource].filter(Boolean).join('\n');
 }
 
+// DSH may append a new system snapshot in history rather than replace its
+// protected head. Only the latest nonempty system snapshot is authoritative;
+// an old matching head or a quoted user message cannot validate a stale tail.
+export function inspectWindowSystemPrefix(messages,profile){
+  let text='',index=-1;
+  for(let i=messages.length-1;i>=0;i--){
+    if(messages[i]?.role!=='system')continue;
+    const content=messages[i].content;
+    const candidate=Array.isArray(content)?content.filter(block=>block?.type==='text').map(block=>String(block.text??'')).join(''):'';
+    if(candidate.trim()){text=candidate;index=i;break;}
+  }
+  const expected=fixedWindowPrefix(profile);
+  return {text,index,matches:index>=0&&text.includes(expected),expectedDigest:digest(expected),actualDigest:digest(text)};
+}
+
 // Register through the agent's scoped service. DSH renders this section into
 // its native system snapshot; the adapter never merges it with user evidence.
 export function bindWindowSystemPrefix(agentCtx,profileFor){

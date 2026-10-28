@@ -2,12 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {validateSchema,validateValue,atomicJson,allowedChat,publicSettings} from '../extension-runtime/catalog.mjs';
+import {API_VERSION,PERMISSIONS,HOST_FEATURES,HOOKS,requiredHostFeatures,hostContract,hostCompatibility,HOST_RUNTIME} from './contract.mjs';
+export {API_VERSION,PERMISSIONS,HOST_FEATURES,HOOKS} from './contract.mjs';
 
-export const API_VERSION=2;
 export const LIMITS=Object.freeze({zipBytes:8*1024*1024,expandedBytes:16*1024*1024,fileBytes:4*1024*1024,files:128,plugins:32});
-export const PERMISSIONS=['storage','history_read','web_fetch','reply','documents','persona_read','model_generate','schedule'];
-export const HOST_FEATURES=['actions-v1','documents-v1','persona-read-v1','model-utility-v1','daily-schedule-v1'];
-export const HOOKS=['before-context','after-response'];
 export const ID=/^[a-z][a-z0-9-]{0,39}$/;
 export const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 export const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
@@ -32,8 +30,12 @@ export function manifest(value){
   if(Object.keys(value).some(key=>!allowed.includes(key)))throw fail('插件清单包含未知字段，请参照 API v2 文档。');
   if(value.author!==undefined&&(typeof value.author!=='string'||value.author.length>120))throw fail('插件作者无效。');
   if(value.homepage!==undefined){try{const url=new URL(value.homepage);if(url.protocol!=='https:'||url.username||url.password)throw Error();}catch{throw fail('插件主页需要使用 HTTPS 地址。');}}
-  if(!Array.isArray(value.permissions??[])||(value.permissions??[]).some(p=>!PERMISSIONS.includes(p)))throw fail('插件声明了不支持的权限。');
-  if(!Array.isArray(value.requiresHostFeatures??[])||(value.requiresHostFeatures??[]).some(name=>!HOST_FEATURES.includes(name)))throw fail('插件需要当前宿主尚不支持的能力，请更新 WeChatAgent。');
+  if(!Array.isArray(value.permissions??[])||(value.permissions??[]).some(p=>typeof p!=='string'||!/^[a-z][a-z0-9_-]{0,63}$/.test(p)))throw fail('插件权限必须为有效名称组成的字符串数组。');
+  const unknownPermissions=(value.permissions??[]).filter(p=>!PERMISSIONS.includes(p));
+  if(unknownPermissions.length)throw fail('插件声明了当前安装宿主不支持的权限：'+[...new Set(unknownPermissions)].join('、')+'。请更新实际运行的 WeChatAgent 宿主后再导入。');
+  if(!Array.isArray(value.requiresHostFeatures??[])||(value.requiresHostFeatures??[]).some(name=>typeof name!=='string'||!/^[a-z][a-z0-9-]{0,63}$/.test(name)))throw fail('requiresHostFeatures 必须为有效能力名称组成的字符串数组。');
+  const unknownFeatures=(value.requiresHostFeatures??[]).filter(name=>!HOST_FEATURES.includes(name));
+  if(unknownFeatures.length)throw fail('插件需要当前安装宿主尚不支持的能力：'+[...new Set(unknownFeatures)].join('、')+'。请更新 WeChatAgent。');
   if(value.requiresAccount!==undefined&&typeof value.requiresAccount!=='boolean')throw fail('requiresAccount 必须为布尔值。');
   if(value.dataNamespace!==undefined&&(value.id!=='fish-notebook'||value.dataNamespace!=='fish-notebook-v1'))throw fail('该历史数据命名空间未向此插件开放。');
   if(value.schedule!==undefined&&(!value.schedule||Array.isArray(value.schedule)||Object.keys(value.schedule).some(key=>!['timeSetting','personaScoped'].includes(key))||typeof value.schedule.timeSetting!=='string'||!(value.permissions??[]).includes('schedule')||value.schedule.personaScoped!==undefined&&typeof value.schedule.personaScoped!=='boolean'||value.schedule.personaScoped&&!(value.permissions??[]).includes('persona_read')))throw fail('插件每日计划配置无效。');
@@ -42,7 +44,7 @@ export function manifest(value){
   validateSchema({type:'object',properties:configSchema,additionalProperties:false});
   validateValue(settings,{type:'object',properties:configSchema,additionalProperties:false},'插件默认设置');
   if(value.schedule&&(!configSchema[value.schedule.timeSetting]||configSchema[value.schedule.timeSetting].type!=='string'||!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(settings[value.schedule.timeSetting]??'')))throw fail('每日计划时间需为 HH:MM，并对应字符串设置字段。');
-  return {...value,permissions:[...new Set(value.permissions??[])],settings,configSchema};
+  return {...value,permissions:[...new Set(value.permissions??[])],requiresHostFeatures:requiredHostFeatures(value),settings,configSchema};
 }
 export function packageFiles(base){
   const files=[],seen=new Set();let bytes=0;
@@ -100,10 +102,10 @@ export function updatePlugin(root,id,body){
 export function pluginCatalog(root,runtime=[]){
   let saved,items;try{saved=configuration(root);items=scanPlugins(root);}catch{return {apiVersion:2,revision:null,plugins:[],error:'插件配置或目录不可读，原文件已保留。请检查 config/plugins.json 和 plugins 目录。'};}
   const running=new Map(runtime.map(item=>[item.id,item]));
-  return {apiVersion:2,hostFeatures:HOST_FEATURES,revision:saved.revision,plugins:items.map(item=>{
+  return {apiVersion:API_VERSION,hostFeatures:HOST_FEATURES,hostPermissions:PERMISSIONS,hostContract:hostContract(),revision:saved.revision,plugins:items.map(item=>{
     const setting=saved.config.plugins[item.id]??{},state=running.get(item.id),enabled=setting.enabled===true;
     return {id:item.id,name:item.name,description:item.description??'',version:item.version,apiVersion:2,host:'wechatagent',management:'wechatagent',author:item.author??'',homepage:item.homepage,
-      revision:item.revision,invalid:!!item.invalid,enabled,permissions:setting.permissions??[],requestedPermissions:item.permissions,requiresHostFeatures:item.requiresHostFeatures??[],chats:setting.chats??[],
+      revision:item.revision,invalid:!!item.invalid,enabled,permissions:setting.permissions??[],requestedPermissions:item.permissions,requiresHostFeatures:item.requiresHostFeatures??[],chats:setting.chats===null?null:setting.chats??[],
       configSchema:item.configSchema,settings:publicSettings(item,{...item.settings,...setting.settings}),actions:state?.actions??[],loaded:state?.loaded===true,active:state?.active===true,
       reason:item.invalid?item.reason:!enabled?'已安装，尚未启用':state?.reason??'设置已保存，等待加载新版 DSH 桥接',statusLabel:item.invalid?'清单无效':!enabled?'已关闭':state?.active?'已开启':'待生效',statusTone:item.invalid?'error':!enabled?'muted':state?.active?'ok':'warning'};
   })};
@@ -117,6 +119,14 @@ export function pluginEnabled(root,id,key){
     const item=manifest(json(file)),saved=configuration(root).config.plugins[id];
     return item.id===id&&saved?.enabled===true&&item.permissions.every(p=>saved.permissions?.includes(p))&&(saved.chats===null||saved.chats?.includes(key));
   }catch{return false;}
+}
+export function runtimeCatalog(catalog,live){
+  const connected=!!live&&(live.runtime??live.pluginRuntime)===HOST_RUNTIME;
+  return {...catalog,runtimeConnected:connected,liveHostContract:live?{apiVersion:live.apiVersion??live.pluginApiVersion,revision:live.revision??live.pluginContractRevision??null,features:live.features??live.pluginHostFeatures??[],permissions:live.permissions??live.pluginPermissions??null}:null,
+    plugins:catalog.plugins.map(item=>{
+      const compatibility=hostCompatibility({...item,permissions:item.requestedPermissions},live);
+      return {...item,compatibility,...(!item.invalid&&!compatibility.compatible&&(item.enabled||live)?{active:false,loaded:false,reason:compatibility.reason,statusLabel:live?'宿主待更新':'等待宿主',statusTone:'warning'}:{})};
+    })};
 }
 export function archivePlugin(root,id,revision){
   const saved=configuration(root);if(saved.revision!==revision)throw fail('插件设置已变化，请刷新后重试。',409);

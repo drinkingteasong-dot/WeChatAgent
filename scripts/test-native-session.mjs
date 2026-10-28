@@ -243,6 +243,28 @@ test('native meme tools return only the current chat resource as authenticated R
   const cached=await runtime.request('/followup',body);assert.equal(cached.cached,true);assert.equal(cached.memeChoices[0].id,id);assert.equal(selections,1);
 });
 
+test('voice input routes the installed API plugin through bound audio without creating a model session',async t=>{
+  const f=await fixture(t),id='a'.repeat(64),account='c'.repeat(64);
+  fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});
+  const config={wechat:{whitelist:{private:['123'],groups:[]},assistant:{administrators:['wxid_voice_admin']}}};
+  const configFile=path.join(f.dir,'config/wechatagent.json');fs.writeFileSync(configFile,JSON.stringify(config));
+  fs.mkdirSync(path.join(f.dir,'state/weflow'),{recursive:true});fs.writeFileSync(path.join(f.dir,'state/weflow/active-account.json'),JSON.stringify({id:account}));
+  const bytes=Buffer.from('synthetic-silk'),sha256=crypto.createHash('sha256').update(bytes).digest('hex');let reads=0,uploads=0;
+  const reader=http.createServer((req,res)=>{reads++;assert.equal(req.headers.authorization,'Bearer reader-fixture');const url=new URL(req.url,'http://localhost');assert.equal(url.searchParams.get('conversationKey'),key);assert.equal(url.searchParams.get('pluginId'),'speech-recognition');res.setHeader('content-type','application/json');res.end(JSON.stringify({id,conversationKey:key,b64:bytes.toString('base64'),sha256,mime:'audio/silk',filename:'voice.silk',durationSeconds:2,sampleRate:0}));});
+  const provider=http.createServer(async(req,res)=>{uploads++;for await(const _chunk of req){}res.end('{"text":"本机模拟服务转写"}');});
+  await new Promise(resolve=>reader.listen(0,'127.0.0.1',resolve));await new Promise(resolve=>provider.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{reader.closeAllConnections();reader.close();provider.closeAllConnections();provider.close();});
+  fs.writeFileSync(path.join(f.dir,'state/wechat-io-config.json'),JSON.stringify({reader_base_url:'http://127.0.0.1:'+reader.address().port,reader_token:'reader-fixture'}));
+  const source=path.resolve('optional-extensions/speech-recognition');fs.cpSync(source,path.join(f.dir,'plugins/speech-recognition'),{recursive:true});
+  const settings=JSON.parse(fs.readFileSync(path.join(source,'plugin.json'))).settings;settings.endpoint='http://127.0.0.1:'+provider.address().port+'/custom';settings.audioFormat='silk';
+  fs.writeFileSync(path.join(f.dir,'config/plugins.json'),JSON.stringify({version:1,plugins:{'speech-recognition':{enabled:true,permissions:['audio_read'],chats:[key],settings,generation:'voice-fixture'}}}));
+  const r=await f.start();assert((await r.request('/health')).pluginHostFeatures.includes('voice-input-v1'));
+  const result=await r.request('/voice-input',{conversationKey:key,id,senderWxid:'wxid_voice_admin'});assert.equal(result.text,'本机模拟服务转写');assert.equal(reads,1);assert.equal(uploads,1);assert.equal(r.calls.create.length,0);assert.equal(r.calls.model.length,0);
+  await r.request('/voice-input',{conversationKey:'wechat:private:999',id},403);
+  const unbound=await r.request('/plugin-actions/speech-recognition/transcribe',{conversationKey:key,args:{id:'b'.repeat(64)}});assert.equal(unbound.ok,false);assert.equal(reads,1);
+  config.wechat.workModes={[key]:'assistant'};fs.writeFileSync(configFile,JSON.stringify(config));await r.request('/voice-input',{conversationKey:key,id,senderWxid:'wxid_stranger'},403);assert.equal(uploads,1);
+});
+
 async function fixture(t) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'WeChatAgent native context '));
   fs.mkdirSync(path.join(dir,'node_modules/@deepseek-ai/dsh-llm'),{recursive:true});
@@ -275,7 +297,7 @@ async function fixture(t) {
       catch(error) { if(error.code==='EADDRINUSE')continue; throw error; }
       port=portServer.address().port;await new Promise(r=>portServer.close(r));break;
     }
-    const listeners=new Map(), agents=new Map(), calls={create:[],resume:[],model:[],inputs:[],requests:[],titles:[],costLogs:[]};let disposer,turn=0;
+    const listeners=new Map(), agents=new Map(), calls={create:[],resume:[],model:[],inputs:[],requests:[],titles:[],costLogs:[],streamChecks:0,prefixBindings:0};let disposer,turn=0;
     const emit=(name,...args)=>{for(const listener of listeners.get(name) ?? [])listener(...args);};
     const waterfall=async(name,payload,next)=>{const callbacks=listeners.get(name) ?? [];let at=0;const invoke=()=>at<callbacks.length?callbacks[at++](payload,invoke):next();return invoke();};
     function session(sid,creation={}) {
@@ -308,10 +330,10 @@ async function fixture(t) {
     };
     function register(sid,creation={}){
       const registeredTools=new Map(),toolGuards=[];
-      const systemSections=new Map(),systemPrompt={getSectionOrder:()=>0,section(section){if(systemSections.has(section.name))throw Error('duplicate scoped section');systemSections.set(section.name,section);return ()=>systemSections.delete(section.name);}};
+      let prefixRegistrations=0;const systemSections=new Map(),systemPrompt={getSectionOrder:()=>0,section(section){if(section.name==='wechatagent:fixed-window-prefix'){prefixRegistrations++;calls.prefixBindings++;}if(systemSections.has(section.name))throw Error('duplicate scoped section');systemSections.set(section.name,section);return ()=>systemSections.delete(section.name);}};
       const sess=session(sid,creation), agent={session:sess,ctx:{on(){return ()=>{};},systemPrompt:options.disableSystemPrompt?undefined:systemPrompt,tools:{presentAs(){},guard(fn){toolGuards.push(fn);return ()=>{};},register(tool){registeredTools.set(tool.name,tool);return ()=>registeredTools.delete(tool.name);}}},systemSections,registeredTools,toolGuards,autoCompact:false,overflowCompact:false,
         followup(message){queueMicrotask(async()=>{
-          const id=++turn;sess.append('turn/start',{turn:id});
+          const id=++turn;sess.append('turn/start',{turn:id});try{
           if(archived.has(sid)){sess.append('turn/end',{turn:id,reason:{kind:'blocked'}});return;}
           if(agent.autoCompact){agent.autoCompact=false;compact(sess);}
           for(let step=0;step<(options.steps??1);step++){
@@ -319,8 +341,9 @@ async function fixture(t) {
           const decision=await waterfall('agent/pre-step',{agent,messages:inbox,step},async()=>({kind:'enter',messages:inbox}));
           const request=await waterfall('agent/request',{agent},async()=>({provider:'fixture-provider',model:'fixture-model',...options.requestSeed}));
           if(request.reasoningEffort!==undefined)assert((options.reasoningInfo??{efforts:[{id:'off'},{id:'high'}]}).efforts.some(item=>item.id===request.reasoningEffort),'provider rejected unsupported reasoning effort');
+          assert.deepEqual(JSON.parse(JSON.stringify(request)),request,'request/header must preserve a lossless JSON snapshot');
           calls.requests.push(request);
-          const systemText=['fixture system guard',...[...systemSections.values()].sort((a,b)=>a.order-b.order).map(section=>typeof section.text==='function'?section.text({scope:agent}):section.text)].filter(Boolean).join('\n\n');
+          const systemText=['fixture system guard',...[...systemSections.values()].sort((a,b)=>a.order-b.order).map(section=>section.name==='wechatagent:fixed-window-prefix'&&(options.omitNativePrefix||options.omitInitialNativePrefix&&prefixRegistrations===1)?'':typeof section.text==='function'?section.text({scope:agent}):section.text)].filter(Boolean).join('\n\n');
           // The native driver commits the first system head only AFTER both
           // hooks. Starting fixtures with a prebuilt head hid early appends.
           if(!sess.snapshotEvents().some(event=>event.type==='system/message')){
@@ -328,16 +351,20 @@ async function fixture(t) {
             sess.append('system/message',{turn:id,step,message:{role:'system',content:[{type:'text',text:systemText}]}},{surfaceOp:'append'});
           }else{
             const head=sess.eventAt(sess.surface.nodes[0]);
-            if(head.type==='system/message'&&head.data.message.content[0]?.text!==systemText)sess.append('system/message',{turn:id,step,message:{role:'system',content:[{type:'text',text:systemText}]}},{surfaceOp:{op:'replace',startSeq:head.seq,endSeq:head.seq},sourceEventSeqs:[head.seq]});
+            if(head.type==='system/message'&&head.data.message.content[0]?.text!==systemText)sess.append('system/message',{turn:id,step,message:{role:'system',content:[{type:'text',text:systemText}]}},options.systemPromptUpdate==='in-history'?{surfaceOp:'append'}:{surfaceOp:{op:'replace',startSeq:head.seq,endSeq:head.seq},sourceEventSeqs:[head.seq]});
           }
           for(const input of decision.messages)sess.append('user/message',input,{surfaceOp:'append'});
           if(agent.overflowCompact){agent.overflowCompact=false;compact(sess);await waterfall('agent/request',{agent},async()=>({provider:'fixture-provider',model:'fixture-model'}));}
-          calls.model.push(sess.surface.nodes.map(seq=>sess.eventAt(seq)).filter(e=>e.type==='user/message').flatMap(e=>e.data.content??[]).map(b=>b.text??'').join('\n'));
-          calls.inputs.push(sess.surface.nodes.map(seq=>sess.eventAt(seq)).map(event=>({...event.data.message??event.data,role:event.type==='system/message'?'system':event.type==='assistant/message'?'assistant':'user'})));
+          const messages=sess.surface.nodes.map(seq=>sess.eventAt(seq)).map(event=>({...event.data.message??event.data,role:event.type==='system/message'?'system':event.type==='assistant/message'?'assistant':'user'}));
+          await waterfall('llm/stream',{sessionId:sid,messages,tools:request.tools??[]},async()=>{
+            calls.streamChecks++;calls.inputs.push(messages);
+            calls.model.push(messages.filter(message=>message.role==='user').flatMap(message=>message.content??[]).map(block=>block.text??'').join('\n'));
+          });
           }
           await options.beforeAssistant?.(agent);
           for(const content of options.assistantMessages??[[{type:'text',text:'SILENT'}]])sess.append('assistant/message',{turn:id,message:{content}},{surfaceOp:'append'});
           sess.append('turn/end',{turn:id,reason:{kind:typeof options.turnReason==='function'?options.turnReason():'completed'}});
+          }catch(error){sess.append('turn/end',{turn:id,reason:{kind:'error',error:{message:error.message}}});}
         });}};
       agents.set(sid,agent);return {dispose:async()=>agents.delete(sid)};
     }
@@ -1102,4 +1129,102 @@ for(const [text,count,mode]of [['为什么？',4,'continuation'],['上次我们�
  const r=await f.start({beforeAssistant:async agent=>{if(mode==='memory')evidence=JSON.parse((await agent.registeredTools.get('wechat_history_search').execute({query:'桂花面'})).content);}});
  await r.request('/followup',c.body(text));const input=r.calls.inputs[0],meta=input.find(m=>m.source?.socialInputWindow).source.socialInputWindow;assert.equal(meta.selection.mode,mode);assert.equal(meta.recentRecords,count);assert.equal(r.calls.model.length,1);
  if(mode==='memory'){assert(!r.calls.model[0].includes('COLD_OLD_'));assert(evidence.matches.some(row=>row.text.includes('桂花面')));}else{assert(r.calls.model[0].includes('COLD_OLD_11'));assert(!r.calls.model[0].includes('COLD_OLD_0 '));assert(r.calls.model[0].includes('COLD_PREVIOUS_ECHO'));}
+});
+
+
+test('the real native stream guard accepts updated system snapshots in both private and group histories',async t=>{
+ for(const kind of ['private','group']){
+  const f=await fixture(t),chat='wechat:'+kind+':123';
+  fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});
+  fs.writeFileSync(path.join(f.dir,'config/wechatagent.json'),JSON.stringify({wechat:{whitelist:{private:['123'],groups:['123']},history:{enabled:true,mode:'window'}}}));
+  const r=await f.start({systemPromptUpdate:'in-history'});
+  const first=await r.request('/followup',{...info,conversationKey:chat,message:'Before owner update'});
+  const previous=structuredClone(f.store.get(first.sessionId).snapshotEvents());
+  const updated='UPDATED_OWNER_PERSONA_'+kind;f.setPersona(chat,'更新人格',updated);
+  const next=await r.request('/followup',{...info,conversationKey:chat,persona:updated,personaName:'更新人格',message:'After owner update'});
+  assert.equal(next.sessionId,first.sessionId);assert.equal(r.calls.streamChecks,2);
+  const systems=r.calls.inputs.at(-1).filter(message=>message.role==='system').map(message=>message.content.map(block=>block.text??'').join(''));
+  assert(systems.length>=2);assert(!systems[0].includes(updated));assert(systems.at(-1).includes(updated));
+  assert.deepEqual(f.store.get(first.sessionId).snapshotEvents().slice(0,previous.length),previous);
+ }
+});
+
+test('a truly missing system prefix blocks the provider and rebinds once on the next new input without rotating history',async t=>{
+ const f=await fixture(t);fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});fs.writeFileSync(path.join(f.dir,'config/wechatagent.json'),JSON.stringify({wechat:{whitelist:{private:['123'],groups:[]},history:{enabled:true,mode:'window'}}}));
+ const r=await f.start({omitInitialNativePrefix:true}),failed=await r.request('/followup',{...info,message:'First request is not sent to the provider',batchId:'a'.repeat(64)},502);
+ assert.equal(failed.detail,'HISTORY_NATIVE_PREFIX_MISSING');assert.equal(r.calls.model.length,0);assert.equal(r.calls.prefixBindings,1);
+ const original=structuredClone(f.store.get(failed.sessionId).snapshotEvents());
+ const next=await r.request('/followup',{...info,message:'A distinct next request',batchId:'b'.repeat(64)});
+ assert.equal(next.sessionId,failed.sessionId);assert.equal(r.calls.prefixBindings,2);assert.equal(r.calls.model.length,1);assert.equal(r.calls.create.length,1);
+ const state=(await r.request('/sessions')).sessions[0];assert.equal(state.generation,0);assert.equal(state.prefixRecovery.status,'verified');assert.equal(state.prefixRecovery.attempts,1);
+ assert.deepEqual(f.store.get(next.sessionId).snapshotEvents().slice(0,original.length),original);
+ const repeated=await r.request('/followup',{...info,message:'First request is not sent to the provider',batchId:'a'.repeat(64)},502);assert(repeated.cached||repeated.error==='turn_already_admitted');assert.equal(r.calls.model.length,1);
+});
+
+test('persistent prefix failures cannot loop registrations or bypass the guard; manual repair is confirmed, idle and history preserving',async t=>{
+ const f=await fixture(t);fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});fs.writeFileSync(path.join(f.dir,'config/wechatagent.json'),JSON.stringify({wechat:{whitelist:{private:['123'],groups:[]},history:{enabled:true,mode:'window'}}}));
+ const options={omitNativePrefix:true},r=await f.start(options);
+ let failed;for(let i=0;i<3;i++)failed=await r.request('/followup',{...info,message:'blocked '+i},502);
+ assert.equal(r.calls.model.length,0);assert.equal(r.calls.prefixBindings,2);
+ const sid=failed.sessionId,body={conversationKey:key,expectedSessionId:sid,confirmed:true};
+ assert.equal((await r.request('/repair-context',{...body,confirmed:false},503)).detail,'HISTORY_REPAIR_CONFIRM_REQUIRED');
+ assert.equal((await r.request('/repair-context',{...body,expectedSessionId:'social-'+('0'.repeat(32))},503)).detail,'HISTORY_REPAIR_SESSION_CHANGED');
+ assert.equal((await r.request('/repair-context',{...body,conversationKey:'wechat:private:999'},503)).detail,'HISTORY_REPAIR_CHAT_NOT_ALLOWED');
+ const agent=r.agents.get(sid);agent.status='running';assert.equal((await r.request('/repair-context',body,503)).detail,'session_busy');agent.status='idle';
+ const original=structuredClone(f.store.get(sid).snapshotEvents());options.omitNativePrefix=false;
+ const repaired=await r.request('/repair-context',body);assert(repaired.repaired&&repaired.historyRetained);assert.equal(repaired.sessionId,sid);assert.equal(r.calls.model.length,0);assert.equal(r.calls.prefixBindings,3);assert(fs.existsSync(path.join(f.dir,repaired.prefixRecovery.backup)));
+ assert.deepEqual(f.store.get(sid).snapshotEvents().slice(0,original.length),original);
+ await r.request('/followup',{...info,message:'Continue after repair'});assert.equal(r.calls.model.length,1);assert.equal(r.calls.create.length,1);assert.equal((await r.request('/sessions')).sessions[0].prefixRecovery.status,'verified');
+ const settingsFile=path.join(f.dir,'config/wechatagent.json'),settings=JSON.parse(fs.readFileSync(settingsFile,'utf8'));settings.wechat.history.mode='bounded';fs.writeFileSync(settingsFile,JSON.stringify(settings));
+ await r.request('/configure',info);const bounded=(await r.request('/sessions')).sessions[0];assert.equal(bounded.prefixRepairAvailable,false);assert.equal(bounded.prefixRecovery,null);
+ assert.equal((await r.request('/repair-context',body,503)).detail,'HISTORY_REPAIR_UNAVAILABLE');
+ settings.wechat.history.mode='window';fs.writeFileSync(settingsFile,JSON.stringify(settings));await r.request('/configure',info);
+ fs.mkdirSync(path.join(f.dir,'state/weflow'),{recursive:true});fs.writeFileSync(path.join(f.dir,'state/weflow/active-account.json'),JSON.stringify({id:'d'.repeat(64)}));
+ assert.equal((await r.request('/repair-context',body,409)).detail,'ACCOUNT_SWITCH_REQUIRES_DSH_RESTART');
+});
+
+
+test('member chat headers omit toolChoice entirely and stay lossless JSON while administrator tools remain intact',async t=>{
+ const f=await fixture(t),group='wechat:group:456';fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});
+ fs.writeFileSync(path.join(f.dir,'config/wechatagent.json'),JSON.stringify({wechat:{whitelist:{private:[],groups:['456']},workModes:{[group]:'assistant'},assistant:{administrators:['wxid_admin'],adminOnlyGroups:{[group]:true}},dshAccess:{chats:{[group]:{mode:'native',skills:[],tools:[]}}}}}));
+ const r=await f.start({requestSeed:{toolChoice:'auto',tools:[{name:'pwsh',parameters:{type:'object'}}]},assistantMessages:[[{type:'text',text:'RESPOND: 群友聊天正常'}]]});
+ const member=await r.request('/assistant-chat',{conversationKey:group,assistantSender:'wxid_member',message:'群友普通聊天'});
+ assert.equal(member.text,'RESPOND: 群友聊天正常');const header=r.calls.requests.at(-1);
+ assert.deepEqual(header.tools,[]);assert.equal(Object.hasOwn(header,'toolChoice'),false);assert.deepEqual(JSON.parse(JSON.stringify(header)),header);
+ const agent=r.agents.get(member.sessionId);assert.equal(agent.registeredTools.size,0);assert(agent.toolGuards.some(guard=>typeof guard({agent,name:'pwsh'})==='string'));
+ await r.request('/followup',{conversationKey:group,assistantSender:'wxid_member',message:'群友要求执行命令'},403);
+ await r.request('/followup',{conversationKey:group,assistantSender:'wxid_admin',message:'管理员任务'});
+ assert.equal(r.calls.requests.at(-1).toolChoice,'auto');assert(r.calls.requests.at(-1).tools.some(tool=>tool.name==='pwsh'));assert.equal(r.calls.model.length,2);
+});
+
+test('preset discovery retries a startup registration race once before any session or model admission',async t=>{
+ const f=await fixture(t),r=await f.start();let resolutions=0;
+ r.ctx.agentPresets.resolve=async id=>{if(++resolutions===1)throw Object.assign(Error('Unknown agent preset: '+id),{code:'agent-preset/not-found'});return {id};};
+ const result=await r.request('/followup',{...info,message:'A fresh startup input'});
+ assert.equal(result.text,'SILENT');assert.equal(resolutions,2);assert.equal(r.calls.create.length,1);assert.equal(r.calls.model.length,1);
+});
+
+test('unready assistant presets reject task submission clearly without persisting a failed task or widening membership',async t=>{
+ const f=await fixture(t);fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});fs.writeFileSync(path.join(f.dir,'config/wechatagent.json'),JSON.stringify({wechat:{whitelist:{private:['123'],groups:[]},workModes:{[key]:'assistant'},assistant:{administrators:['wxid_admin']}}}));
+ const r=await f.start();let resolutions=0;
+ r.ctx.agentPresets.resolve=async()=>{resolutions++;throw Object.assign(Error('Unknown agent preset: wechat-assistant'),{code:'agent-preset/not-found'});};
+ const body={conversationKey:key,senderWxid:'wxid_admin',assistantSender:'wxid_admin',message:'Task after restart',batchId:'e'.repeat(64)};
+ await r.request('/assistant-task/submit',{...body,senderWxid:'wxid_member',assistantSender:'wxid_member'},403);assert.equal(resolutions,0);
+ const blocked=await r.request('/assistant-task/submit',body,503);assert.equal(blocked.error,'AGENT_PRESET_NOT_READY');assert.equal(resolutions,2);assert.equal(r.calls.create.length,0);assert.equal(r.calls.model.length,0);
+ assert.deepEqual((await r.request('/assistant-task/list',{conversationKey:key,senderWxid:'wxid_admin'})).tasks,[]);
+ r.ctx.agentPresets.resolve=async id=>({id});const accepted=await r.request('/assistant-task/submit',body);assert(accepted.task.id);
+ let done;for(let i=0;i<200;i++){done=await r.request('/assistant-task/result',{conversationKey:key,senderWxid:'wxid_admin',taskId:accepted.task.id});if(done.task.state==='completed')break;await new Promise(resolve=>setTimeout(resolve,5));}
+ assert.equal(done.task.state,'completed');assert.equal(r.calls.model.length,1);
+ r.ctx.agentPresets.resolve=async()=>{throw Error('Unknown agent preset: wechat-assistant');};
+ const duplicate=await r.request('/assistant-task/submit',body);assert.equal(duplicate.task.id,accepted.task.id);assert.equal(r.calls.model.length,1);
+});
+
+
+test('preset preflight does not retry unrelated failures and rechecks owner revocation after waiting',async t=>{
+ const f=await fixture(t);fs.mkdirSync(path.join(f.dir,'config'),{recursive:true});const file=path.join(f.dir,'config/wechatagent.json'),settings={wechat:{whitelist:{private:['123'],groups:[]},workModes:{[key]:'assistant'},assistant:{administrators:['wxid_admin']}}};fs.writeFileSync(file,JSON.stringify(settings));
+ const r=await f.start(),body={conversationKey:key,senderWxid:'wxid_admin',assistantSender:'wxid_admin',message:'Guarded task',batchId:'f'.repeat(64)};let calls=0;
+ r.ctx.agentPresets.resolve=async()=>{calls++;throw Error('FIXTURE_PERMISSION_DENIED');};
+ const failed=await r.request('/assistant-task/submit',body,503);assert.equal(failed.detail,'FIXTURE_PERMISSION_DENIED');assert.equal(calls,1);
+ calls=0;r.ctx.agentPresets.resolve=async id=>{if(++calls===1)throw Error('Unknown agent preset: '+id);settings.wechat.assistant.administrators=[];fs.writeFileSync(file,JSON.stringify(settings));return {id};};
+ await r.request('/assistant-task/submit',body,403);assert.equal(calls,2);assert.equal(r.calls.create.length,0);assert.equal(r.calls.model.length,0);
 });

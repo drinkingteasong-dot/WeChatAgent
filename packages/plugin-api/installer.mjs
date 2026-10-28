@@ -28,7 +28,7 @@ export class PluginInstaller{
       for(const file of files){const target=path.resolve(folder,...file.name.split('/'));if(!target.startsWith(folder+path.sep))throw fail('ZIP 路径无效。');fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,file.data,{flag:'wx'});}
       const item=inspectPackage(folder),installed=scanPlugins(this.root).find(row=>row.id===item.id);
       this.tickets.set(ticket,{folder,item,expiresAt:Date.now()+10*60000});
-      return {ticket,revision:configuration(this.root).revision,plugin:{id:item.id,name:item.name,description:item.description,version:item.version,author:item.author??'',permissions:item.permissions,apiVersion:2},installedVersion:installed?.version??null,files:files.length,bytes:files.reduce((sum,file)=>sum+file.data.length,0)};
+      return {ticket,revision:configuration(this.root).revision,plugin:{id:item.id,name:item.name,description:item.description,version:item.version,author:item.author??'',permissions:item.permissions,requiresHostFeatures:item.requiresHostFeatures,apiVersion:2},installedVersion:installed?.version??null,files:files.length,bytes:files.reduce((sum,file)=>sum+file.data.length,0)};
     }catch(error){this.remove(folder);throw error;}
   }
   cancel(ticket){const item=this.tickets.get(ticket);if(item){if(fs.existsSync(item.folder))this.remove(item.folder);this.tickets.delete(ticket);}return {ok:true};}

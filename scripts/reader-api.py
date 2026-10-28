@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from wechat_files import FILE_TYPE, parse_file_message, FileCatalog
+from wechat_voice_input import VoiceCatalog, voice_info, load_voice_blob, audio_result
 from wechat_media import clean_account_wxid, image_cache_current
 from wechat_forwarded import FORWARD_TYPE, parse_forwarded_record
 from wechat_quote import QUOTE_TYPE, parse_quote_reply
@@ -78,6 +79,8 @@ def image_worker_failure(stderr):
             value = result.get(key, '')
             if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.]{1,80}', value):
                 details.append(key + '=' + value)
+        if code == 'IMAGE_STICKER_LOCAL_COPY_UNAVAILABLE' and result.get('reason') == 'STICKER_CDN_DISABLED':
+            details.extend(('reason=STICKER_CDN_DISABLED', 'setting=wechat.media.allowStickerCdn'))
     except (ValueError, IndexError, AttributeError):
         if 'ModuleNotFoundError:' in stderr:
             code = 'IMAGE_DEPENDENCY_MISSING'
@@ -127,7 +130,7 @@ def push_payload(talker, message, names, own_wxid, identity=None):
     if message.get('isSend'):
         return None
     kind = message.get('localType')
-    if kind not in (1, 3, 47, APPMSG_STICKER_TYPE, PAT_TYPE, 49, FORWARD_TYPE, QUOTE_TYPE, FILE_TYPE):
+    if kind not in (1, 3, 34, 47, APPMSG_STICKER_TYPE, PAT_TYPE, 49, FORWARD_TYPE, QUOTE_TYPE, FILE_TYPE):
         return None
     pat = parse_pat(message.get('fullText', ''), sender, own_wxid) if kind == PAT_TYPE else None
     if kind == PAT_TYPE and not pat:
@@ -139,10 +142,13 @@ def push_payload(talker, message, names, own_wxid, identity=None):
     forwarded = parse_forwarded_record(message.get('fullText', '')) if kind in (49, FORWARD_TYPE) else None
     quote_reply = parse_quote_reply(message.get('fullText', '')) if kind in (49, QUOTE_TYPE) else None
     file_info = parse_file_message(kind, message.get('fullText', ''))
+    voice = voice_info(message.get('fullText', '')) if kind == 34 else None
+    if kind == 34 and not voice:
+        return None
     sticker = kind==47 or kind in (49,APPMSG_STICKER_TYPE) and sticker_image_xml(kind,message.get('fullText','')) is not None
     if kind in (49, APPMSG_STICKER_TYPE, FORWARD_TYPE, QUOTE_TYPE) and not sticker and file_info is None and forwarded is None and quote_reply is None:
         return None
-    content = '[文件] ' + file_info['name'] if file_info else '[图片]' if kind == 3 else '[表情包：附件为静态画面或动画采样画面]' if sticker else '[拍一拍] 对方刚刚拍了拍你。' if pat else '[合并转发聊天记录] ' + forwarded['title'] if forwarded else (quote_reply['reply'] or '[引用回复，正文为空]') if quote_reply else message.get('fullText', message.get('content') or message.get('parsedContent', ''))
+    content = '[语音，尚未转写]' if voice else '[文件] ' + file_info['name'] if file_info else '[图片]' if kind == 3 else '[表情包：附件为静态画面或动画采样画面]' if sticker else '[拍一拍] 对方刚刚拍了拍你。' if pat else '[合并转发聊天记录] ' + forwarded['title'] if forwarded else (quote_reply['reply'] or '[引用回复，正文为空]') if quote_reply else message.get('fullText', message.get('content') or message.get('parsedContent', ''))
     if not content.strip():
         return None
     group = '@chatroom' in talker
@@ -156,6 +162,7 @@ def push_payload(talker, message, names, own_wxid, identity=None):
         'senderName': names.get(sender, sender), 'talkerId': sender,
         'content': content[:4000], 'type': FILE_TYPE if file_info else 47 if sticker else kind, 'timestamp': message.get('createTime', 0),
         **({'file': file_info} if file_info else {}),
+        **({'voice': {**voice, 'localId': message.get('localId'), 'serverId': str(message.get('serverId') or '0'), 'createTime': message.get('createTime')}} if voice else {}),
         **({'pat': pat} if pat else {}),
         **({'forwardedRecord': forwarded} if forwarded else {}),
         **({'quoteReply': quote_reply} if quote_reply else {}),
@@ -200,6 +207,8 @@ class Reader:
         self.image_jobs = {}
         self.image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self.files = FileCatalog(self.root, self.account, self.sticker_account_active)
+        self.voices = VoiceCatalog(self.root, self.account, self.sticker_account_active)
+        self.voice_slots = threading.BoundedSemaphore(2)
         self.sticker_jobs = {}
         self.sticker_retry_at = {}
         self.sticker_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -371,7 +380,7 @@ class Reader:
             # Preserve complete text: the upstream CLI display truncates to 200.
             table = 'Msg_' + hashlib.md5(talker.encode()).hexdigest()
             for message in data.get('messages', []):
-                if message.get('localType') not in (1, PAT_TYPE, 49, FORWARD_TYPE, QUOTE_TYPE, 47, APPMSG_STICKER_TYPE, FILE_TYPE):
+                if message.get('localType') not in (1, 34, PAT_TYPE, 49, FORWARD_TYPE, QUOTE_TYPE, 47, APPMSG_STICKER_TYPE, FILE_TYPE):
                     continue
                 for connection in connections:
                     if table not in nt.msg_tables(connection):
@@ -407,6 +416,52 @@ class Reader:
         config = read_json(self.root / 'config' / 'wechatagent.json')
         kind = 'groups' if '@chatroom' in talker else 'private'
         return self.conversation_id(talker) in map(str, config['wechat']['whitelist'][kind])
+
+    def resolve_voice(self, voice_id, key, plugin_id, format='wav'):
+        if format not in ('wav', 'silk'):
+            raise ValueError('VOICE_FORMAT_UNSUPPORTED')
+        record = self.voices.record(voice_id, key, plugin_id)
+        if not self.voice_slots.acquire(blocking=False):
+            raise RuntimeError('VOICE_READER_BUSY')
+        try:
+            # Verify the complete message identity and real sender before opening media DBs.
+            connections = self.open_messages()
+            matched = False
+            try:
+                table = 'Msg_' + hashlib.md5(record['talker'].encode()).hexdigest()
+                for connection in connections:
+                    if table not in nt.msg_tables(connection):
+                        continue
+                    row = connection.execute('SELECT local_type,real_sender_id FROM "'+table+'" WHERE local_id=? AND create_time=? AND server_id=? LIMIT 1', (record['localId'], record['createTime'], int(record['serverId']))).fetchone()
+                    if row and row[0] == 34:
+                        sender = connection.execute('SELECT user_name FROM Name2Id WHERE rowid=?', (row[1],)).fetchone()
+                        if sender and sender[0] == record['sender']:
+                            matched = True
+            finally:
+                for connection in connections:
+                    connection.close()
+            if not matched:
+                raise RuntimeError('VOICE_MESSAGE_IDENTITY_NOT_FOUND')
+            raw = load_voice_blob(self.account, {**record, 'passphrase': self.passphrase}, nt)
+            duration, sample_rate = record['durationSeconds'], 0
+            if format == 'wav':
+                try:
+                    process = subprocess.run([sys.executable, '-B', str(self.root/'scripts/decode-wechat-voice.py')], input=json.dumps({'b64': base64.b64encode(raw).decode('ascii')}), text=True, encoding='utf-8', capture_output=True, timeout=6, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError('VOICE_DECODE_TIMEOUT') from None
+                if process.returncode:
+                    try:
+                        code = json.loads(process.stderr.strip().splitlines()[-1]).get('error', '')
+                    except (ValueError, IndexError):
+                        code = ''
+                    raise RuntimeError(code if re.fullmatch(r'VOICE_[A-Z_]{3,80}', code) else 'VOICE_DECODE_FAILED')
+                decoded = json.loads(process.stdout)
+                raw = base64.b64decode(decoded['b64'], validate=True)
+                duration, sample_rate = decoded['durationSeconds'], 16000
+            self.voices.record(voice_id, key, plugin_id)  # Recheck account and grants after preparation.
+            return audio_result(voice_id, key, raw, format, duration, sample_rate)
+        finally:
+            self.voice_slots.release()
 
     def image_row(self, talker, descriptor):
         if not self.image_talker_allowed(talker):
@@ -777,6 +832,11 @@ class Reader:
                             if not reference:
                                 continue
                             payload['file'] = reference
+                        if payload['type'] == 34:
+                            reference = self.voices.remember(talker, payload, 'wechat:' + ('group:' if '@chatroom' in talker else 'private:') + self.conversation_id(talker))
+                            if not reference:
+                                continue
+                            payload['voice'] = reference
                         if payload['type'] in (3, 47):
                             image_id = self.register_image(talker, payload)
                             if not image_id:
@@ -937,6 +997,8 @@ def serve(reader, port, token):
                         'groupIdentity': 'account-chatroom-v1', 'lastGroupMetadataError': getattr(reader, 'group_metadata_error', '')})
                 elif re.fullmatch(r'/api/v1/files/[a-f0-9]{64}', url.path):
                     self.respond(reader.files.resolve(url.path.rsplit('/', 1)[1], query.get('conversationKey', [''])[0], query.get('senderWxid', [''])[0]))
+                elif re.fullmatch(r'/api/v1/voices/[a-f0-9]{64}', url.path):
+                    self.respond(reader.resolve_voice(url.path.rsplit('/', 1)[1], query.get('conversationKey', [''])[0], query.get('pluginId', [''])[0], query.get('format', ['wav'])[0]))
                 elif re.fullmatch(r'/api/v1/images/[a-f0-9]{64}', url.path):
                     self.respond(reader.resolve_image(url.path.rsplit('/', 1)[1]))
                 elif re.fullmatch(r'/api/v1/stickers/pool-review/[a-f0-9]{64}',url.path):
@@ -960,7 +1022,7 @@ def serve(reader, port, token):
             except PermissionError:
                 self.respond({'success': False, 'error': 'Conversation is not selected'}, 403)
             except Exception as error:
-                image_failure = re.fullmatch(r'/api/v1/images/[a-f0-9]{64}', url.path) and isinstance(error, RuntimeError) and re.fullmatch(r'IMAGE_[A-Z_]{3,80}', str(error))
+                image_failure = (re.fullmatch(r'/api/v1/images/[a-f0-9]{64}', url.path) and re.fullmatch(r'IMAGE_[A-Z_]{3,80}', str(error)) or re.fullmatch(r'/api/v1/voices/[a-f0-9]{64}', url.path) and re.fullmatch(r'VOICE_[A-Z_]{3,80}', str(error))) and isinstance(error, RuntimeError)
                 self.respond({'success': False, 'error': str(error) if image_failure else 'Reader query failed: ' + type(error).__name__}, 503)
 
         def do_POST(self):

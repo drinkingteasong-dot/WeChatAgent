@@ -45,3 +45,22 @@ test('same fix version can detect a later corrected build but still rejects draf
  assert.equal((await f.checker.check()).status,'available');
  for(const flags of [{draft:true},{prerelease:true}]){const rejected=fixture(t,{version:'0.3.7'},[{...release('0.3.7-fix'),...flags}]);assert.equal((await rejected.checker.check()).status,'unavailable');}
 });
+
+test('plus release is newer than base and fix and uses URL-encoded plus signs for downloads',async t=>{
+ assert(compareVersions('0.4.1+','0.4.1')>0);assert(compareVersions('0.4.1+','0.4.1-fix')>0);assert(compareVersions('0.4.2','0.4.1+')>0);
+ for(const encoded of [false,true]){
+  const data=release('0.4.1+');if(encoded)data.assets[0].browser_download_url=prefix+'v0.4.1%2B/WeChatAgent-Setup-0.4.1%2B-x64.exe';
+  const f=fixture(t,{version:'0.4.1'},[data]),result=await f.checker.check();
+  assert.equal(result.status,'available');assert.equal(result.latestVersion,'0.4.1+');assert.equal(result.downloadUrl,prefix+'v0.4.1%2B/WeChatAgent-Setup-0.4.1%2B-x64.exe');
+ }
+});
+test('package aliases display their public release label and never offer the base version as an upgrade',async t=>{
+ const f=fixture(t,{version:'0.4.1+plus',releaseVersion:'0.4.1+'},[release('0.4.1')]),result=await f.checker.check();
+ assert.equal(result.currentVersion,'0.4.1+');assert.equal(result.status,'up_to_date');
+});
+test('plus release downloads still require the exact repository path without credentials, query or fragment',async t=>{
+ for(const url of ['https://evil.example/v0.4.1%2B/setup.exe',prefix+'v0.4.1%2B/WeChatAgent-Setup-0.4.1%2B-x64.exe?redirect=1',prefix+'v0.4.1%2B/WeChatAgent-Setup-0.4.1%2B-x64.exe#fragment',prefix+'v0.4.1%2B/other.exe']){
+  const data=release('0.4.1+');data.assets[0].browser_download_url=url;
+  assert.equal((await fixture(t,{version:'0.4.1'},[data]).checker.check()).status,'up_to_date');
+ }
+});

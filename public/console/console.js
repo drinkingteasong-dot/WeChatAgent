@@ -109,13 +109,14 @@ function updateDraftUI() {
   }
   if($('#delete-role'))$('#delete-role').disabled=state.savingAll||roleSaves.size>0||!!state.deletingRole||state.job?.state==='running';
 }
-async function api(route, body, retry = true) {
-  const response = await fetch(route, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Console-Token': state.token, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(route === '/api/browse' ? 180000 : route === '/api/fish-notebook/write' ? 45000 : 20000) });
+async function api(route, body, retry = true, options = {}) {
+  const timeout=AbortSignal.timeout(route === '/api/browse' ? 180000 : route === '/api/fish-notebook/write' ? 45000 : route === '/api/plugins/speech-recognition/check' ? 40000 : 20000);
+  const response = await fetch(route, { method: body === undefined ? 'GET' : 'POST', headers: { 'X-Console-Token': state.token, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: options.signal?AbortSignal.any([timeout,options.signal]):timeout });
   const result = await response.json();
   if (response.status === 401 && retry) {
     const info = await fetch('/api/info').then(r => r.json());
     if (info.root !== state.root) throw new Error('控制台连接到其他项目，请重新打开当前项目入口。');
-    state.token = info.token; return api(route, body, false);
+    state.token = info.token; return api(route, body, false, options);
   }
   if (!response.ok) throw Object.assign(new Error(result.error ?? '操作失败，请重试。'),{status:response.status});
   return result;
@@ -740,3 +741,15 @@ load().catch(error => { $('#connection-label').innerHTML='<i class="dot failed">
 setInterval(() => { if (!document.hidden && state.token) refreshStatus(); }, 5000);
 
 document.addEventListener('click',async event=>{const target=event.target.closest('[data-assistant-status],[data-assistant-cancel]');if(!target)return;target.disabled=true;try{const action=target.dataset.assistantCancel?'cancel':'status',result=await api('/api/assistant-task/'+action,{key:target.dataset.assistantCancel??target.dataset.assistantStatus,...(target.dataset.assistantTaskId?{taskId:target.dataset.assistantTaskId}:{})});if(action==='cancel')toast('已请求取消任务。');else modal('助手任务状态','<pre class="log-output">'+escapeHtml(result.text??(result.running?'任务正在执行，请在 DSH 查看进度或审批。':'当前没有正在执行的任务。'))+'</pre>');await renderPage();}catch(error){toast(error.message);}finally{target.disabled=false;}});
+
+// Context repair is local configuration maintenance, separate from paid compaction.
+document.addEventListener('click',event=>{
+  const button=event.target.closest('[data-context-repair]');if(!button||button.disabled)return;
+  if(hasDraft()){toast('请先保存或放弃草稿，再修复上下文。');return;}
+  confirmAction('修复这个聊天的上下文','重新绑定当前人格前缀并刷新模型可见窗口。会话 ID、原始历史与能力权限保留；不调用模型，不补发此前失败的消息。','修复上下文',async()=>{
+    button.disabled=true;button.setAttribute('aria-busy','true');
+    try{await api('/api/sessions/repair-context',{key:button.dataset.contextRepair,expectedSessionId:button.dataset.contextSession,confirmed:true});await renderPage();toast('已重新绑定上下文，下一条新消息将验证修复结果。');}
+    catch(error){showError(error.message);}
+    finally{button.disabled=false;button.removeAttribute('aria-busy');}
+  });
+});

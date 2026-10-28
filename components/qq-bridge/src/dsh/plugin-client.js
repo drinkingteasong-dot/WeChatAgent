@@ -33,6 +33,14 @@ export class DshPluginClient {
 
   async modelSearchReady(){await this.searchReady();return this.modelSearchSupported===true;}
 
+  async recognizeVoice(conversationKey,voice,senderWxid,{signal}={}){
+    const response=await fetch(this.url+'/voice-input',{method:'POST',headers:{authorization:'Bearer '+this.token,'content-type':'application/json'},
+      body:JSON.stringify({conversationKey,id:voice.id,senderWxid}),signal:AbortSignal.any([AbortSignal.timeout(34000),...(signal?[signal]:[])])});
+    const body=await response.json();
+    if(!response.ok)return {ok:false,code:/^VOICE_[A-Z0-9_]+$/.test(body.code??'')?body.code:'VOICE_INPUT_UNAVAILABLE'};
+    return body;
+  }
+
   async followup(conversationKey, message, metadata = {}, {busyRetries=0}={}) {
     // The server reads the owner's persona locally. Send only its digest to
     // detect stale settings without duplicating up to 60 KB in every RPC.

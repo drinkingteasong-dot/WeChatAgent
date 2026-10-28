@@ -136,6 +136,14 @@ def image_error_code(error):
     return 'IMAGE_RESOLUTION_FAILED'
 
 
+def image_failure_payload(error):
+    result = {'success': False, 'error': image_error_code(error),
+              'exceptionType': type(error).__name__}
+    if result['error'] == 'IMAGE_STICKER_LOCAL_COPY_UNAVAILABLE' and getattr(error, 'reason', None) == 'STICKER_CDN_DISABLED':
+        result.update(reason='STICKER_CDN_DISABLED', setting='wechat.media.allowStickerCdn')
+    return result
+
+
 if __name__ == '__main__':
     try:
         if sys.argv[1:] == ['--check-runtime']:
@@ -144,6 +152,5 @@ if __name__ == '__main__':
             descriptor = json.loads(sys.stdin.read(16384))
             print(json.dumps({'success': True, **resolve(descriptor)}))
     except Exception as error:
-        print(json.dumps({'success': False, 'error': image_error_code(error),
-                         'exceptionType': type(error).__name__}), file=sys.stderr)
+        print(json.dumps(image_failure_payload(error)), file=sys.stderr)
         sys.exit(1)

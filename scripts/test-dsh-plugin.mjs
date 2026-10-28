@@ -32,7 +32,7 @@ test('DSH plugin creates one safe session per group and resumes mappings', async
   fs.writeFileSync(path.join(packageDir, 'package.json'), '{"type":"module","exports":"./index.js"}');
   fs.writeFileSync(path.join(packageDir, 'index.js'), 'export class BlockAssembler {} export const createUserMessage = (value) => value;');
   fs.copyFileSync(path.join(root, 'packages', 'dsh-social-bridge-plugin', 'index.js'), path.join(dir, 'index.js'));
-  fs.writeFileSync(path.join(dir, 'native-context.mjs'), fs.readFileSync(path.join(root, 'packages', 'dsh-social-bridge-plugin', 'native-context.mjs'), 'utf8').replace("'../../scripts/reader-account-state.mjs'", JSON.stringify(pathToFileURL(path.join(root, 'scripts/reader-account-state.mjs')).href)));
+  fs.writeFileSync(path.join(dir, 'native-context.mjs'), fs.readFileSync(path.join(root, 'packages', 'dsh-social-bridge-plugin', 'native-context.mjs'), 'utf8').replace("'../../scripts/reader-account-state.mjs'", JSON.stringify(pathToFileURL(path.join(root, 'scripts/reader-account-state.mjs')).href)).replace("'../plugin-api/contract.mjs'",JSON.stringify(pathToFileURL(path.join(root,'packages/plugin-api/contract.mjs')).href)));
   fs.copyFileSync(path.join(root, 'packages', 'dsh-social-bridge-plugin', 'image-input.mjs'), path.join(dir, 'image-input.mjs'));
   fs.copyFileSync(path.join(root, 'packages', 'dsh-social-bridge-plugin', 'deadline.mjs'), path.join(dir, 'deadline.mjs'));
   fs.copyFileSync(path.join(root, 'packages', 'dsh-social-bridge-plugin', 'session-groups.mjs'), path.join(dir, 'session-groups.mjs'));

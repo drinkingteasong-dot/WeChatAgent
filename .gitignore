@@ -127,3 +127,4 @@ Thumbs.db
 
 # Verified first-party plugin included in the source release
 !/optional-extensions/packages/fish-notebook-1.0.0.zip
+!/optional-extensions/packages/speech-recognition-1.2.0.zip

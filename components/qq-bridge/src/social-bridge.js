@@ -1,4 +1,6 @@
-import {pluginEnabled} from '../../../packages/plugin-api/catalog.mjs';
+import {pluginEnabled,configuration as pluginConfiguration} from '../../../packages/plugin-api/catalog.mjs';
+import {writeVoiceAttempt} from '../../../packages/plugin-api/voice-status.mjs';
+import {VoiceIngress} from './core/voice-ingress.js';
 import {replyMessageLimit} from '../../../packages/dsh-social-bridge-plugin/reply-layout-policy.mjs';
 import {AssistantFeedback} from '../../../packages/dsh-social-bridge-plugin/assistant-feedback.mjs';
 import {createAssistantNoticeDelivery} from './core/assistant-notice-delivery.js';
@@ -102,7 +104,15 @@ const contextMaintenance = new ContextMaintenance({ buffer, social: engine,
   proactivePending: key => !!proactive.state.chats[key]?.job,
   isReady: () => connection.ready && adapter.stats.connected && !!adapter.selfId, log });
 
-adapter.onMessage(async (message) => {
+const voiceIngress=new VoiceIngress({
+  generationFor:()=>pluginConfiguration(historyRoot).config.plugins['speech-recognition']?.generation??'',
+  onResult:(_message,result,generation)=>writeVoiceAttempt(historyRoot,result,generation),
+  recognize:(message,options)=>plugin.recognizeVoice(buildConversationKey(message.platform,message.kind,message.conversation_id),message.voice,verifiedAssistantSender(message),options),
+  canRecognize:async message=>{const key=buildConversationKey(message.platform,message.kind,message.conversation_id);return activeReaderAccount(historyRoot).id===historyAccount.id&&pluginEnabled(historyRoot,'speech-recognition',key)&&await connection.check({force:true})&&!connection.skips(message)&&(engine.workModeFor(key)!=='assistant'||engine.assistantAllowed(key,message));},
+  deliver:routeIncoming,log,
+});
+adapter.onMessage(message=>{void voiceIngress.push(message).catch(()=>log('[Voice] inbound_failed'));});
+async function routeIncoming(message) {
   try {
     const list = message.kind === 'group' ? allowedGroups : allowedPrivate;
     if (!list.has(String(message.conversation_id))) {
@@ -117,7 +127,7 @@ adapter.onMessage(async (message) => {
       await memberConnection.check({force:true});memberEngine.receive({...message,assistant_chat_only:true});
     }else{await connection.check({force:true});engine.receive(message);}
   } catch (error) { log(`[Social] inbound error=${error?.message ?? error}`); }
-});
+}
 adapter.on('open', () => log('[WeChat] OneBot adapter connected'));
 adapter.on('close', () => log('[WeChat] OneBot adapter disconnected'));
 adapter.on('error', (error) => log(`[WeChat] adapter error=${error?.message ?? error}`));
@@ -139,6 +149,6 @@ const noticeDelivery=createAssistantNoticeDelivery({adapter,plugin,settingsFor:(
 const assistantNoticeTimer=setInterval(()=>void noticeDelivery.tick(),5000);
 const proactiveTimer=setInterval(()=>void proactive.tick(),60000);void proactive.tick();
 const contextTimer = setInterval(() => void contextMaintenance.tick(), 30000); void contextMaintenance.tick();
-const stop = async () => { clearInterval(contextTimer);contextMaintenance.stop();clearInterval(proactiveTimer);noticeDelivery.stop();clearInterval(replayTimer);clearInterval(assistantNoticeTimer); connection.stop();memberConnection.stop();engine.stop();memberEngine.stop(); await adapter.stop(); historyStore.close(); process.exit(0); };
+const stop = async () => { voiceIngress.stop(); clearInterval(contextTimer);contextMaintenance.stop();clearInterval(proactiveTimer);noticeDelivery.stop();clearInterval(replayTimer);clearInterval(assistantNoticeTimer); connection.stop();memberConnection.stop();engine.stop();memberEngine.stop(); await adapter.stop(); historyStore.close(); process.exit(0); };
 process.once('SIGINT', () => void stop());
 process.once('SIGTERM', () => void stop());

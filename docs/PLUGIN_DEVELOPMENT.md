@@ -66,10 +66,10 @@ ZIP 最大 8 MiB，解压后最大 16 MiB，单文件最大 4 MiB，最多 128 �
 | version | 必需，如 `1.0.0` 或 `1.1.0-beta.1`。 |
 | apiVersion / host | 必须分别为 `2` / `wechatagent`。 |
 | author / homepage | 可选。作者最多 120 字符；主页只接受 HTTPS，不允许 URL 用户凭据。 |
-| permissions | 可选字符串数组，仅接受下表列出的宿主权限，所有声明权限均需授权后才能运行。 |
+| permissions | 可选字符串数组，仅接受下表列出的宿主权限，所有声明权限均需授权后才能运行。文档、模型、人设、计划和音频权限会自动合并对应的宿主能力要求。 |
 | settings | 可选，完整的默认设置，必须符合 configSchema。 |
 | configSchema | 可选，设置字段到 Schema 的映射，最多 24 项。 |
-| requiresHostFeatures | 可选，所需能力标识数组；不支持时拒绝安装，不能假装兼容。 |
+| requiresHostFeatures | 可选，额外所需能力标识数组，与权限推导的要求合并；本机安装宿主不支持时拒绝安装，不能假装兼容。 |
 | requiresAccount | 可选布尔值，true 时要求已绑定微信账号才能运行。 |
 | schedule | 可选每日计划，格式见后文；需 schedule 权限。 |
 | dataNamespace | 仅第一方 fish-notebook 的旧数据兼容声明，其他插件不可指定。 |
@@ -143,6 +143,7 @@ export function setup(api) {
 | await ctx.history.recent({limit:20}) | `history_read`，当前聊天最近 1–100 条已收录文字记录。 |
 | await ctx.fetch(url,{maxChars:12000,timeoutMs:6000}) | `web_fetch`，公开 HTTP(S) GET，返回标准 Response。 |
 | await ctx.reply(text) | `reply`，申请本轮回复，返回 `{queued:true}`，不是即时送达回执。 |
+| await ctx.audio.read(id,{format:'wav'}) | `audio_read` + `voice-input-v1`；仅限宿主为本次语音动作绑定的 id，返回有界音频 `{id,b64,mime,filename,sampleRate,durationSeconds}`。format 可为 wav 或 silk；钩子不可调用。 |
 
 存储键只允许 1–64 个英文字母、数字、`_`、`-`；值必须可 JSON 序列化。同一账号下每插件总存储上限 256 KiB。账号、插件、聊天、发送者不能通过参数改成其他目标。
 
@@ -223,6 +224,10 @@ export function setup(api) {
 
 ## 打包、更新和卸载
 
+### 可选语音输入能力
+
+`voice-input-v1` 是 API v2 的可选宿主扩展。声明 `audio_read` 以及所需宿主能力后，可在受控动作中读取当前原消息绑定的语音。普通模型工具、本机通用动作接口和钩子不会自动获得语音 id 的绑定。配套示例为 `optional-extensions/speech-recognition/`，完整链路见 [微信语音 API 转写](VOICE_INPUT.md)。示例通过自己配置的 POST API 转写；这不改变 `ctx.fetch` 原有的公开 GET 限制。插件直接网络请求受其自身超时控制，Node 代码仍属于可信代码。
+
 项目提供校验打包命令：
 
 ```powershell
@@ -267,6 +272,12 @@ Compress-Archive -Path '.\chat-notes\*' -DestinationPath '.\chat-notes-1.0.0.zip
 预览 ticket 有效 10 分钟，同一控制台最多保留 4 份。提交使用插件配置 revision 检查冲突，409 时重新读取列表或重新选择 ZIP，不要强行覆盖。
 
 ## 开发验收清单
+
+安装管理、DSH 宿主、插件子进程与前端的权限和能力声明统一来自 `packages/plugin-api/contract.mjs`。控制台返回本机契约与实际 DSH 契约，安装预览提示运行宿主缺失的能力；已连接但过旧的 DSH 不能启用不兼容插件。需要账号的插件在账号未绑定时不会初始化。宿主与 worker 契约不一致时，报告 `PLUGIN_HOST_CONTRACT_MISMATCH` 并停止该插件，请完整重开 DSH。
+
+发布前运行 `node scripts/plugin-host-check.mjs`；对照另一版本可使用 `--compare <另一个项目目录>`。此检查不执行插件代码，会核对宿主文件、共享声明、第一方插件的权限/能力、ZIP 与源码及校验值。安装器构建前后和公开源码检查均调用此检查，避免只更新开发目录或遗漏安装模板文件。
+
+第一方 ZIP 重新生成使用 `npm run plugin:pack`；公开 Git 工作区的源码包使用 `npm run source:build`，先执行宿主及隐私校验，再生成来源哈希。Python 边界测试可通过环境变量 `WECHATAGENT_TEST_PYTHON` 指定解释器，避免依赖本机私有配置或占位的 `python` 命令。
 
 - ZIP 根目录或单层目录中含合法 plugin.json 和 index.mjs；没有 npm 安装步骤。
 - 安装后未启用时，不产生任何代码执行或网络请求。
