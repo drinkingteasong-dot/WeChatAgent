@@ -15,7 +15,7 @@
 </p>
 
 WeChatAgent 支持好友和群聊的人格对话与独立上下文。连接 DeepSeek Harness（DSH），还能通过微信交办已授权的任务。
-有问题可以添加Q群：1127571726
+有问题可以添加Q群：550582874
 
 **[下载安装](https://github.com/sourcepro5/WeChatAgent/releases)** · [快速开始](#快速开始) · [使用教程](#使用教程) · [常见问题](#常见问题) · [更新](RELEASE_NOTES.md)
 
