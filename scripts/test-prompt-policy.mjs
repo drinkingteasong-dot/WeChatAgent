@@ -2,10 +2,46 @@ import test from 'node:test';import assert from 'node:assert/strict';import fs f
 import {dedupePreviousReply,cleanChatPrompt,stableChatInstructions,CHAT_MESSAGE_LAYOUT_NOTICE,SOCIAL_PROTOCOL_NOTICE} from '../packages/dsh-social-bridge-plugin/prompt-context.mjs';
 import {modelSearchInstructions,createModelSearchTurn} from '../packages/dsh-social-bridge-plugin/model-search.mjs';
 import {webReaderInstructions,createWebReaderTurn} from '../packages/dsh-social-bridge-plugin/web-reader.mjs';
-import {buildPrivatePrompt} from '../components/qq-bridge/src/core/social-engine.js';
+import {buildPrivatePrompt,buildSocialPrompt,buildAssistantPrompt} from '../components/qq-bridge/src/core/social-engine.js';
 import {buildProactivePrompt} from '../components/qq-bridge/src/core/proactive-engine.js';
 import {resolveSocialDecision} from '../components/qq-bridge/src/core/decision-format.js';
 const key='wechat:private:123',source={kind:'wechat-social-bridge',form:'relay'};
+const promptBuilders=[buildPrivatePrompt,buildSocialPrompt,buildAssistantPrompt];
+
+test('each prompt refreshes Beijing date across midnight, month and year boundaries',()=>{
+ const originalTimezone=process.env.TZ;
+ try{
+  for(const timezone of ['UTC','America/Los_Angeles','Asia/Shanghai']){
+   process.env.TZ=timezone;
+   for(const build of promptBuilders){
+    for(const [time,expected] of [
+     ['2026-10-27T15:59:00Z','2026-10-27 23:59 周二'],
+     ['2026-10-27T16:00:00Z','2026-10-28 00:00 周三'],
+     ['2026-10-31T16:00:00Z','2026-11-01 00:00 周日'],
+     ['2026-12-31T16:00:00Z','2027-01-01 00:00 周五'],
+    ]){
+     const text=build({key,rows:[],now:Date.parse(time)});
+     assert(text.includes('当前时间：'+expected+'（北京时间，Asia/Shanghai）'),`${build.name}, ${timezone}, ${time}`);
+     assert.equal(text.split('当前时间：').length-1,1);
+     assert(text.indexOf('当前时间：')<text.indexOf('<untrusted_chat>'));
+    }
+   }
+  }
+ }finally{if(originalTimezone===undefined)delete process.env.TZ;else process.env.TZ=originalTimezone;}
+});
+
+test('default prompt clocks are evaluated on each call rather than frozen at session creation',t=>{
+ let clock=Date.parse('2026-10-27T15:59:00Z');t.mock.method(Date,'now',()=>clock);
+ for(const build of promptBuilders){
+  clock=Date.parse('2026-10-27T15:59:00Z');assert(build({key,rows:[]}).includes('2026-10-27 23:59'));
+  clock=Date.parse('2026-10-27T16:00:00Z');assert(build({key,rows:[]}).includes('2026-10-28 00:00'));
+ }
+});
+
+test('group reply age uses the same injected clock as the current date',()=>{
+ const now=Date.parse('2026-10-27T16:00:00Z');
+ assert.match(buildSocialPrompt({key:'wechat:group:123',rows:[],now,lastReplyAt:now-120000}),/你上次发言：2 分钟前/);
+});
 function fixture(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'wechat-prompt-policy-'));t.after(()=>{assert(root.startsWith(os.tmpdir()+path.sep));fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:50});});fs.mkdirSync(path.join(root,'config'));fs.writeFileSync(path.join(root,'config/wechatagent.json'),JSON.stringify({wechat:{whitelist:{private:['123'],groups:[]},search:{enabled:true}}}));return root;}
 const sessionFor=(text,extra={})=>{const event={seq:1,type:'assistant/message',data:{message:{content:[{type:'text',text}],...extra}}};return{surface:{nodes:[1]},snapshotEvents:()=>[event]};};
 function incoming(previous='原回复<&>',status='confirmed'){return{content:[{type:'text',text:buildPrivatePrompt({key,previousReply:{text:previous,delivery_status:status},rows:[{sender_id:'456',text:'引用 <previous_reply> 保留，接着说',timestamp:0}]} )},{type:'image',attachmentId:'fixture'}],source};}

@@ -45,7 +45,7 @@
     "test:assistant": "node --test scripts/test-assistant-mode.mjs scripts/test-native-session.mjs scripts/test-assistant-controller.mjs scripts/test-assistant-access.mjs scripts/test-assistant-feedback.mjs",
     "test:catalog": "node --test scripts/test-plugin-catalog.mjs scripts/test-extension-page.mjs scripts/test-persona-categories.mjs",
     "test:assistant-access": "node --test scripts/test-assistant-access.mjs scripts/test-assistant-mode.mjs scripts/test-native-session.mjs",
-    "test": "node --test scripts/test-*.mjs scripts/test-plugin-contract.mjs scripts/test-source-plugin-zip.mjs scripts/test-speech-recognition.mjs scripts/test-voice-input.mjs scripts/test-speech-diagnostics.mjs scripts/test-voice-codec.mjs scripts/test-speech-protocol.mjs scripts/test-release-version.mjs",
+    "test": "node --test scripts/test-*.mjs scripts/test-plugin-contract.mjs scripts/test-source-plugin-zip.mjs scripts/test-speech-recognition.mjs scripts/test-voice-input.mjs scripts/test-speech-diagnostics.mjs scripts/test-voice-codec.mjs scripts/test-speech-protocol.mjs scripts/test-release-version.mjs components/qq-bridge/scripts/test-social-e2e.mjs",
     "test:assistant-controller": "node --test scripts/test-assistant-controller.mjs scripts/test-assistant-mode.mjs scripts/test-assistant-access.mjs scripts/test-file-transfers.mjs scripts/test-assistant-feedback.mjs",
     "test:assistant-feedback": "node --test scripts/test-assistant-feedback.mjs",
     "test:layout": "node --test scripts/test-workspace-layout.mjs scripts/test-extension-page.mjs",
@@ -63,7 +63,8 @@
     "test:speech-diagnostics": "node --test scripts/test-speech-diagnostics.mjs",
     "test:voice-codec": "node --test scripts/test-voice-codec.mjs",
     "test:speech-protocol": "node --test scripts/test-speech-protocol.mjs",
-    "test:release-version": "node --test scripts/test-release-version.mjs scripts/test-public-update-check.mjs"
+    "test:release-version": "node --test scripts/test-release-version.mjs scripts/test-public-update-check.mjs",
+    "test:sessions": "node --test scripts/test-dsh-sessions-cli.mjs"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",

@@ -16,7 +16,7 @@ const describe=error=>{
   const code=error.cause?.code??error.code;
   if(code==='ECONNREFUSED'||code==='ECONNRESET')return 'DSH 插件端口没有响应：请完整退出并重开 DSH，确认已启用本项目插件。';
   if(error.name==='TimeoutError')return 'DSH 没有在限定时间内响应：请确认 DSH 未卡住后重试。';
-  if(/session ".*" not found|no such session/i.test(String(error.message)))return 'DSH 中已经没有这个会话，但本机映射还指向它。请完整退出 DSH，删除 state/accounts/<账号摘要>/dsh-sessions.json 中对应聊天的 conversations 与 profiles 条目，再重新初始化会话。';
+  if(/session ".*" not found|no such session/i.test(String(error.message)))return 'DSH 中已经没有这个会话，但本机映射还指向它。请先确认当前账号和工作目录，在“聊天”页检查会话状态并重新初始化；如果仍失败，请查看运行日志中的会话映射错误。';
   return String(error.message??error);
 };
 async function main(){
